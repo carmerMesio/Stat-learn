@@ -1,0 +1,124 @@
+---
+title: "Estimating the conditional variance by local linear regression"
+author: "Mattia Barbero - David Cardoner - Arnau Mercader"
+date: "11 de marzo de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,comment='',message=FALSE,fig.width = 7,fig.height = 5)
+```
+
+
+### Objective
+
+From one side, fit a non parametric regression with two different approaches to obtain the optimal bandwith, firstly with leave one out cross-validation and secondly with plug-in method implemented in kernelSmooth package.
+On the other side, estimate the conditional variance $\sigma^2(x_i)$ with the two methods described above.
+
+
+In the next chunk we read the aircraft dataset and perform transformations of variables applying logarithm.
+
+```{r}
+sm.options(display="none") #to avoid generate the plot.
+library(sm)
+library(dplyr)
+data(aircraft)
+#help(aircraft)
+aircraft<-aircraft %>% mutate_at(.vars = vars(Power,Span,Length,Weight,Speed,Range),.funs = funs(log))
+noms <-unlist(strsplit(paste0("log",names(aircraft)[3:length(names(aircraft))],collapse = ","),split = ","))
+noms <- c("Yr","Period",noms)
+names(aircraft)<-noms
+```
+
+### First approach: Leave one out cross-validation with locpolreg
+
+We call the functions defined in Atenea. For implement leave one out cross-validation we evaluate the function k-fold equal to n, so we are using all the observations in the dataset.
+
+```{r}
+source("locpolreg.r")
+source("k_fold_cross_oneleave_smooth.r")
+
+```
+
+With locpolreg function and the modified k_fold cross-validation we find the optimal **h (bandwidth)** evaluated in a grid of 101 points between $log(0.5),...,log(15)$. In the next plot we can see the optimal bandwidth comparing the estimated **MSPE** with different bandwidths.
+
+```{r}
+##Provar de posar altres Kernels no nomes Normal.
+h.v <-  exp( seq(from=log(.5), to = log(15), length=101))
+out.lout.cv <- h.k.fold.cv(x=aircraft$Yr, y=aircraft$logWeight, h.v=h.v, k=length(aircraft$Period))
+##con esto se hace un kernel gaussiano (Normal). Provar epanechnikov.
+y.max <- max(out.lout.cv$k.cv)
+y.min <- min(out.lout.cv$k.cv)
+
+plot(h.v,out.lout.cv$k.cv,ylim=c(y.min,y.max),ylab="estimated MSPE",type = "l",col=2,
+     main="Estimated MSPE by leave one out cv")
+##valor optimo de h (o bandwith).
+h.out<-out.lout.cv$h.v[which.min(out.lout.cv$k.cv)]
+```
+
+The best value = `r round(h.out,3)`. 
+Now we use the locpolreg functon with the best bandwidth to estimate the logarithm maximum take-off weight (kg) versus the years of manufacture. The type of kernel considered is a normal kernel. Once obtained the $\hat{m}(x)$ function now we calculate the residuals and perform $z_i = log(r_i^2)$, where $r_i$ denote the residuals of model. With these $z_i$ variables, we reuse locpolreg function with the same bandwidth (we could discuss if we should change the bandwidth or not) and same kernel. With the results of this estimation we perform $\sigma^2(x_i)=exp(\hat{q_x})$, where $\hat{q_x}$ are the estimations of the previous model (evaluated with locpolreg function.
+
+
+```{r}
+mx <- locpolreg(aircraft$Yr,aircraft$logWeight,h=h.out,type.kernel="normal",doing.plot=FALSE)
+mxpred <- mx$mtgr
+residuals <- (aircraft$logWeight-mxpred)
+zi <- log(residuals^2)
+
+qx <- locpolreg(aircraft$Yr,zi,h=h.out,type.kernel="normal",doing.plot=FALSE)
+sigma2x<-exp(qx$mtgr)
+plot(aircraft$Yr,residuals^2,ylim = range(0,20),xlab="Year of first manufacture",ylab = "Square residuals", main = "Smooth Residual Estimation using locpolreg")
+lines(aircraft$Yr,sigma2x,col=2,lwd=2)
+```
+
+
+```{r}
+plot(aircraft$Yr,aircraft$logWeight,xlab = "Year of first manufacture",ylab = "log maximum take-off weight (kg)"
+     ,main="Non param model vs linear model")
+lines(aircraft$Yr,predict(lm(logWeight~Yr,data=aircraft)),col=4,lwd=2)
+lines(aircraft$Yr,mxpred,col=2,lwd=2)
+lines(aircraft$Yr,mxpred+1.96*(sqrt(sigma2x)),col=3,lwd=2,lty=2)
+lines(aircraft$Yr,mxpred-1.96*(sqrt(sigma2x)),col=3,lwd=2,lty=2)
+```
+
+
+```{r}
+##Apartat 2.
+library(sm)
+library(KernSmooth)
+h.dpill <- dpill(x=aircraft$Yr,y=aircraft$logWeight,gridsize=101,
+                 range.x=range(aircraft$Yr))
+
+smpred <- sm.regression(x=aircraft$Yr,y=aircraft$logWeight,h=h.dpill,eval.points=aircraft$Yr)
+
+mxpredsm <- smpred$estimate
+residuals <- (aircraft$logWeight-mxpredsm)
+zi <- log(residuals^2)
+
+qx <- sm.regression(x=aircraft$Yr,y=zi,h=h.dpill,eval.points=aircraft$Yr)
+linealm<-lm(logWeight~Yr,data=aircraft)
+sigma2x<-exp(qx$estimate)
+plot(aircraft$Yr,residuals^2,ylim = range(0,20))
+# lines(aircraft$Yr,(linealm$residuals^2),col=4,lwd=2)
+lines(aircraft$Yr,sigma2x,col=2,lwd=2)
+```
+```{r}
+plot(aircraft$Yr,aircraft$logWeight,xlab = "Year of first manufacture",ylab = "log maximum take-off weight (kg)"
+     ,main="Non param model vs linear model")
+lines(aircraft$Yr,predict(lm(logWeight~Yr,data=aircraft)),col=4,lwd=2)
+lines(aircraft$Yr,mxpred,col=2,lwd=2)
+lines(aircraft$Yr,mxpred+1.96*(sqrt(sigma2x)),col=3,lwd=2,lty=2)
+lines(aircraft$Yr,mxpred-1.96*(sqrt(sigma2x)),col=3,lwd=2,lty=2)
+
+```
+
+#### Comparación MSE
+
+```{r}
+mse <- function(a,b){mean((a-b)^2)}
+mse_plugin <- mse(mxpredsm,aircraft$logWeight)
+mse_l1out_cv <- mse(mxpred,aircraft$logWeight)
+cbind(mse_plugin,mse_l1out_cv)
+```
+

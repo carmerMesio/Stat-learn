@@ -1,0 +1,273 @@
+---
+title: "Task 3"
+author: "David Cardoner & Arnau Mercader"
+date: "25 de febrero de 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,fig.height = 8, fig.width = 8)
+```
+
+## Ap 1.  
+For the Boston House-price corrected dataset use Lasso estimation (in glmnet) to fit the regression model where the response is CMEDV (the corrected version of MEDV) and the explanatory variables are the remaining 13 variables in the previous list. Try to provide an interpretation to the estimated model.
+
+```{r}
+library(MASS)
+library(glmnet)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(knitr)
+library(caTools)
+data(Boston)
+```
+
+First we are going to explore the response MDEV and apply some transformation. We are not going to scale the response because we will use intercept in Lasso regression model __(glmnet)__.
+
+```{r}
+par(mfrow=c(1,2))
+Boston %>% mutate(cmed=log(medv+1)) %>% gather(respuesta,valor,14:15) %>%  ggplot(.,aes(valor,fill=as.factor(respuesta))) + geom_histogram() + guides(fill=FALSE) + facet_wrap(~respuesta,scales = "free")
+```
+
+
+```{r}
+CARET.TRAIN.CTRL <- trainControl(method="cv",
+                                 number = 10,
+                                 verboseIter=FALSE)
+```
+
+
+We take a look at the data variables. Find NA's and categorical encoding for variable rad.
+
+```{r}
+Boston$cmed <- log(Boston$medv+1)
+
+str(Boston)
+#categorical hot encoding for rad
+Boston$rad <- as.factor(as.character(Boston$rad))
+dummies<-dummyVars(~rad,data = Boston)
+
+BostonSc <- Boston %>% select_if(is.numeric) %>% mutate_all(funs(scale)) %>% as.data.frame()
+
+##number of NA's
+sapply(Boston,function(x){sum(which(is.na(x)))})
+
+categorical_1_hot <- predict(dummies,Boston)
+
+BostonSc <- cbind(BostonSc,categorical_1_hot)
+```
+
+We fit a Lasso regression model fixing alpha equal to one in glmnet.
+
+```{r}
+
+sn<-sample.split(BostonSc,0.75)
+BostonSc <- BostonSc %>% select(-c(medv))
+train <- BostonSc[sn,]
+test <- BostonSc[!sn,]
+y <- Boston$cmed[sn]
+testy <- Boston$cmed[!sn]
+X_train <- train %>% select(-c(cmed))
+X_test <- test %>% select(-cmed)
+set.seed(123)  # for reproducibility
+model_lasso <- train(x=X_train,y=y,
+                  method="glmnet",
+                  metric="RMSE",
+                  maximize=FALSE,
+                  trControl=CARET.TRAIN.CTRL,
+                  tuneGrid=expand.grid(alpha=1,  # Lasso regression
+                                       lambda=c(1,0.1,0.05,0.01,seq(0.009,0.001,-0.001),
+                                            0.00075,0.0005,0.0001)))
+model_lasso
+
+```
+
+#### Glmnet with 10 fold cross-validation and 100 default lambdas
+
+```{r}
+X_train <- data.matrix(X_train)
+X_test <- data.matrix(X_test)
+set.seed(123)
+# by default uses 10 fold cross validation. Uses 100 lambdas
+modelglmnet <- cv.glmnet(X_train,y,family = "gaussian",alpha = 1,standardize = FALSE,intercept = TRUE,type.measure = "mse")
+
+plot(modelglmnet,main = "Lasso")
+coef(modelglmnet, s = "lambda.1se")
+
+cat("The best lambda is",modelglmnet$lambda.min,"\n")
+
+```
+
+
+#### Glmnet with 10 fold cross-validation and same lambdas as caret 
+
+```{r}
+modelglmnet2 <- cv.glmnet(X_train,y,family = "gaussian",alpha = 1,standardize = FALSE,intercept = TRUE,lambda = c(1,0.1,0.05,0.01,seq(0.009,0.001,-0.001),0.00075,0.0005,0.0001),type.measure = "mse")
+```
+
+
+now we make predictions with glmnet. Ten fold cross-validation is performed with alpha equal to 1 for Lasso regressión. Intercept is set to True because __response__ is not centered.
+
+```{r}
+pred_glmnet = exp(predict(modelglmnet2,newx=X_test))-1
+pred_caret = exp(predict(model_lasso,newdata = X_test))-1
+# cbind(pred,exp(testy)-1) %>% View()
+data_pred <- data.frame(pred_glmnet=pred_glmnet,pred_caret=pred_caret)
+data_pred %>%   ggplot(.,aes(pred_caret,pred_glmnet)) + geom_point() + ggtitle("Prediction using caret vs. glmnet")
+
+
+```
+
+
+
+```{r}
+pred_glmnet0 = exp(predict(modelglmnet,newx=X_test))-1
+data_pred0 <- data.frame(pred_glmnet0=pred_glmnet0,response=exp(testy)-1)
+data_pred0 %>%   ggplot(.,aes(pred_glmnet0,response)) + geom_point() + ggtitle("Predict with default 100 lambdas vs. \n CMED variable")
+```
+
+#### MSE obtained in 3 methods
+```{r}
+require(Metrics)
+cat("With tune lambdas")
+mse(pred_glmnet,exp(testy)-1)
+cat("With default lambdas")
+mse(pred_glmnet0,exp(testy)-1)
+cat("Using caret package and tuning lambdas:")
+mse(pred_caret,exp(testy)-1)
+
+cat("The best metric is obtained with default lambdas using glmnet package. \n")
+```
+
+#### Interpretation of estimated best model ( object __modelglmnet__ )
+
+```{r}
+cat("Plot lambdas vs. metric")
+plot(modelglmnet,main = "Lasso")
+
+cat("Coef. with best lambda")
+coef(modelglmnet, s = "lambda.min")
+
+imp_coef <- as.data.frame(as.matrix(coef(modelglmnet, s = "lambda.min")))
+imp_coef$coef.name <- rownames(imp_coef)
+imp_coef$coef.value <- imp_coef$`1`
+
+ggplot(imp_coef) +
+    geom_bar(aes(x=reorder(coef.name,coef.value),y=coef.value),
+             stat="identity") +
+    ylim(min(imp_coef$coef.value)-.5,max(imp_coef$coef.value)+.5) +
+    coord_flip() +
+    ggtitle("Coefficents in the Lasso Model with lambda.min argument") +
+    theme(axis.title=element_blank())
+
+imp_coef <- as.data.frame(as.matrix(coef(modelglmnet, s = "lambda.1se")))
+imp_coef$coef.name <- rownames(imp_coef)
+imp_coef$coef.value <- imp_coef$`1`
+
+ggplot(imp_coef) +
+    geom_bar(aes(x=reorder(coef.name,coef.value),y=coef.value),
+             stat="identity") +
+    ylim(min(imp_coef$coef.value)-.5,max(imp_coef$coef.value)+.5) +
+    coord_flip() +
+    ggtitle("Coefficents in the Lasso Model with lambda.min argument") +
+    theme(axis.title=element_blank())
+
+
+
+cat("Coef. with lambda in 1 square error")
+coef(modelglmnet, s = "lambda.1se")
+cat("Notice that loosing few value of metric we obtain a model with less parameters, indicating that lasso obtain sparsity solutions.")
+
+```
+
+#### Ap 2.
+Perform ridge regression and compare with the ridge realised in previous practice.
+To perform ridge regression we fix the value of alpha to zero.
+```{r}
+y <- y - mean(y)
+modelglmnet_ridge <- cv.glmnet(X_train,y,family = "gaussian",alpha = 0,standardize = FALSE,intercept = FALSE,type.measure = "mse")
+```
+
+```{r,echo=TRUE}
+
+CV_kfolds_ridge <- function(X,y,folds,lambda.v,seed_value=NULL) {
+  
+  # as.numeric all covariables X
+  X <- sapply(X,as.numeric)
+  
+  # scale data & input data to -1
+  X[is.na(X)] <- -1
+  mean_X <- apply(X,2,mean)
+  sd_X <- apply(X,2,sd)
+  y_mean <- mean(y)
+  
+  X <- as.matrix(scale(X, center=mean_X, scale=sd_X))
+  y <- as.matrix(scale(y, center=y_mean, scale=FALSE))
+  
+  data <- cbind(y,X)
+  
+  if(is.null(seed_value)){1234}
+  set.seed(seed_value)
+  # permut data and make k folds
+  data<-data[sample(nrow(data)),]
+  
+  
+  # Create k size folds
+  kfolds <- cut(seq(1,nrow(data)),breaks=folds,labels=FALSE)
+  
+  
+  # result for lambda l
+  cv_kfolds_mpse_lambda <- numeric(length(lambda.v))
+  
+  
+  for (l in 1:length(lambda.v)){ 
+    
+    lambda <- lambda.v[l]
+    cv_kfolds_mpse <- numeric(folds)
+    
+    for (i in 1:folds){
+    
+    idx <- which(kfolds==i)
+    train <- data[-idx, ]
+    test <- data[idx, ]
+    n_train <- dim(train)[1]
+    p_train <- dim(train)[2]-1
+    n_test <- dim(test)[1]
+    p_test <- dim(test)[2]-1
+    
+    
+    beta.path <- matrix(0,nrow=1, ncol=p_train)
+    
+    
+    XtX <- t(train[,-1]) %*% train[,-1]
+    H.lambda.aux <- t(solve(XtX + lambda*diag(1,p_train))) %*% t(train[,-1])
+    beta.path <-  H.lambda.aux %*% as.matrix(train[,1])
+    hat.Y_val <- test[,-1] %*% beta.path
+    cv_kfolds_mpse[i] <- sum((test[,1]-hat.Y_val)^2)/n_test
+    }
+    
+    cv_kfolds_mpse_lambda[l] <- mean(cv_kfolds_mpse)
+    cv_kfolds_mpse <- NULL
+  }
+  
+  
+  min_lambda <- lambda.v[which.min(cv_kfolds_mpse_lambda)]
+  cat("Resultados considerando k=",folds,"folds: \n")
+  cat("\n")
+  cat("El lambda que hace mínimo el PMSE es: ",min_lambda,"\n")
+  cat("\n")
+  cat("El PMSE es: ",min(cv_kfolds_mpse_lambda) )
+  
+  plot(lambda.v,cv_kfolds_mpse_lambda,main = 'Valores lambda vs. k-fold MSPE',
+       ylab='MPSE error',xlab="values of lambda")
+  
+}
+
+lambda.search = modelglmnet_ridge$lambda
+CV_kfolds_ridge(X=Boston[,1:13],y=Boston[,15],folds=10,lambda.v=lambda.search,seed_value = 123)
+
+```
